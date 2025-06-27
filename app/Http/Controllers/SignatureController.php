@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Services\SignatureServices;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use setasign\Fpdi\Fpdi;
 use Exception;
@@ -65,6 +66,13 @@ class SignatureController extends Controller
             $cnpj = $request->cnpj;
             $signatureServices = new SignatureServices();
 
+            // Caso vem acontencer de um dia ter mais informações, aqui é onde deve ser adicionado
+            $nome = $request->nome;
+            $cpf = $request->cpf;
+            $cargo = $request->cargo;
+            $secretaria = $request->secretaria;
+            $data_assinatura = $request->date;
+            $matricula = $request->matricula;
 
 
             if (!$request->hasFile('pdf')) {
@@ -73,7 +81,6 @@ class SignatureController extends Controller
                     ->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
                     ->header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
             }
-
 
             $pdfPath = $request->file('pdf')->getPathname();
 
@@ -87,22 +94,16 @@ class SignatureController extends Controller
                 throw new Exception("Failed to process PDF with pdftk" . $returnVar);
             }
 
-            // Caso vem acontencer de um dia ter mais informações, aqui é onde deve ser adicionado
-            $nome = $request->nome;
-            $cpf = $request->cpf;
-            $cargo = $request->cargo;
-            $secretaria = $request->secretaria;
-            $matricula = $request->matricula;
-
-
             $fpdi = new PDF_Rotate();
             $pageCount = $fpdi->setSourceFile($tempPath);
             $uuid = Uuid::uuid4();
 
             $codigoVerificao = $signatureServices->randomCode();
 
-            // Aqui configuramos o url do qr code que será gerado
-            $qrContent = 'http://192.168.18.243:8001/api/signature/' . $codigoVerificao . '?data=' . json_encode(array(
+            // arquivo original
+            $hash = $signatureServices->openSSL($pdfPath, $matricula);
+
+            $qrContent = 'http://192.168.18.243:8001/api/verifySignature/' . $hash . '?data=' . json_encode(array(
                 'entidade' => $entidade,
                 'cnpj' => $cnpj,
                 'nome' => $nome,
@@ -110,10 +111,12 @@ class SignatureController extends Controller
                 'cargo' => $cargo,
                 'secretaria' => $secretaria,
                 'matricula' => $matricula,
+                'dta_ass' => $data_assinatura,
             ));
 
+
             // Gerar o qrcode
-            $qrImage = QrCode::format('png')->size(100)->generate($qrContent);
+            $qrImage = QrCode::format('png')->size(500)->generate($qrContent);
             $qrData = 'data://text/plain;base64,' . base64_encode($qrImage);
 
             $repeat = $request->input('repeat', false);
@@ -133,7 +136,7 @@ class SignatureController extends Controller
 
                     $fpdi->setFont('helvetica', '', 6);
                     $textLines = [
-                        "DOCUMENTO ASSINADO DIGITALMENTE. CODIGO {$codigoVerificao}",
+                        "DOCUMENTO ASSINADO DIGITALMENTE. CODIGO {$codigoVerificao} - DATA DA ASSINATURA: {$data_assinatura}",
                         strtoupper($nome) . " CPF: " . $signatureServices->formataCnpjCpf($cpf) . " MATRICULA: {$matricula}",
                         "CARGO: " . strtoupper($cargo) . " ORGAO:" . $signatureServices->removeCaracteresEspeciais($secretaria, ' '),
                         "APONTE SUA CAMARA PARA O QRCODE PARA VERIFICAR AUTENTICIDADE.",
@@ -173,13 +176,10 @@ class SignatureController extends Controller
 
             unlink($tempPath);
 
-            // return response()->json([
-            //     'pdf' => base64_encode($output),
-            //     'codigoVerificao' => $codigoVerificao
-            // ])
-            //     ->header('Access-Control-Allow-Origin', '*')
-            //     ->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-            //     ->header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+            $tempOutputFile = tempnam(sys_get_temp_dir(), 'signed_pdf_');
+            file_put_contents($tempOutputFile, $output);
+            $hash = $signatureServices->openSSL($tempOutputFile, $matricula);
+            unlink($tempOutputFile);
 
             return response($output, 200)
                 ->header('Content-Type', 'application/pdf')
@@ -200,6 +200,12 @@ class SignatureController extends Controller
                 ->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
                 ->header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
         }
+    }
+
+    public function verifySignature($hash, Request $request)
+    {
+        $signatureServices = new SignatureServices();
+        $signatureServices->verifySignature($hash, $request->matricula);
     }
 
     public function signature($codigoVerificao, Request $request)

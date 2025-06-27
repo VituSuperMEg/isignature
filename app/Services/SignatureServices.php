@@ -51,6 +51,44 @@ class SignatureServices
        chr(rand(65, 90));
     }
 
+    public function openSSL ($document, $matricula) {
+        $privateKeyResource = openssl_pkey_new([
+            "private_key_bits" => 2048,
+            "private_key_type" => OPENSSL_KEYTYPE_RSA,
+        ]);
+        openssl_pkey_export($privateKeyResource, $privateKey);
+        $publicKey = openssl_pkey_get_details($privateKeyResource)["key"];
+
+        $document = file_get_contents($document);
+        $md5Hash= md5($document);
+        $hash = hash("sha256", $document, true);
+
+        openssl_private_encrypt($hash, $assinatura, $privateKey);
+
+        if (!is_dir($md5Hash)) {
+            mkdir($md5Hash, 0777, true);
+        }
+
+        file_put_contents("$md5Hash/assinatura.bin", $assinatura);
+        file_put_contents("$md5Hash/chave_publica.pem", $publicKey);
+
+        return $md5Hash;
+    }
+
+    public function verifySignature($hash, $matricula) {
+        $assinatura = file_get_contents("$hash/assinatura.bin");
+        $publicKey = file_get_contents("$hash/chave_publica.pem");
+        $hashDocument = file_get_contents("$hash/hash.bin");
+
+        openssl_public_decrypt($assinatura, $hashDescriptografado, $publicKey);
+
+        if ($hashDocument === $hashDescriptografado) {
+            echo "Assinatura válida e documento íntegro.";
+        } else {
+            echo "Assinatura inválida ou documento foi alterado." . $hash . " " . $hashDescriptografado;
+        }
+    }
+
     public static function formataCnpjCpf($value)
     {
         $cnpj_cpf = preg_replace("/\D/", '', $value);
