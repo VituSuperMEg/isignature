@@ -62,3 +62,102 @@ If you discover a security vulnerability within Laravel, please send an e-mail t
 ## License
 
 The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+
+# Sistema de Assinatura Digital - iSignature
+
+## Proteção de Pastas com Senha
+
+O sistema agora suporta a proteção das pastas de usuário com senha. Quando uma senha é fornecida na requisição, todos os arquivos de assinatura (assinatura.bin, chave_publica.pem, documento.pdf) são criptografados usando AES-256-CBC.
+
+### Como Usar
+
+#### 1. Criar Assinatura com Proteção por Senha
+
+Para proteger a pasta do usuário com senha, inclua o campo `senha` na requisição:
+
+```bash
+curl -X POST http://localhost:8000/api/ \
+  -H "Content-Type: multipart/form-data" \
+  -F "pdf=@documento.pdf" \
+  -F "entidade=EXEMPLO" \
+  -F "cnpj=12.345.678/0001-90" \
+  -F "nome=João Silva" \
+  -F "cpf=123.456.789-01" \
+  -F "cargo=Analista" \
+  -F "secretaria=Secretaria de Exemplo" \
+  -F "matricula=123456" \
+  -F "senha=minhasenhasegura123"
+```
+
+#### 2. Verificar Assinatura Protegida
+
+A senha é automaticamente incluída no QR code gerado. Quando o QR code for escaneado, a verificação será feita usando a senha armazenada.
+
+### Segurança
+
+- **Criptografia**: AES-256-CBC
+- **Chave**: Derivada do SHA-256 da senha
+- **IV**: Aleatório para cada arquivo
+- **Validação**: Hash SHA-256 da senha é armazenado em `.protected`
+
+### Estrutura da Pasta
+
+#### Sem Proteção:
+```
+123456/
+├── assinatura.bin
+├── chave_publica.pem
+└── documento.pdf
+```
+
+#### Com Proteção:
+```
+123456/
+├── .protected          (hash da senha)
+├── assinatura.bin      (criptografado)
+├── chave_publica.pem   (criptografado)
+└── documento.pdf       (criptografado)
+```
+
+### Tratamento de Erros
+
+- Se a pasta estiver protegida e a senha não for fornecida: "Senha é obrigatória para acessar arquivos protegidos"
+- Se a senha estiver incorreta: "Senha incorreta"
+- Se houver erro na descriptografia: "Erro ao descriptografar o arquivo"
+
+### Compatibilidade
+
+- Pastas criadas sem senha continuam funcionando normalmente
+- Não há impacto em assinaturas existentes não protegidas
+- O sistema detecta automaticamente se uma pasta está protegida
+
+### Exemplo de Response
+
+#### Sucesso (com proteção):
+```http
+HTTP/1.1 200 OK
+Content-Type: application/pdf
+Verification-Code: 12A-34B-56C
+Id-Documento: a5fc0a29-bab4-46f5-a60e-6e93ed5314e1
+```
+
+#### Erro (senha incorreta):
+```json
+{
+  "codigo_transacao": "a5fc0a29-bab4-46f5-a60e-6e93ed5314e1",
+  "erro": "Senha incorreta"
+}
+```
+
+### Métodos Disponíveis na SignatureServices
+
+```php
+// Verificar se uma pasta está protegida
+$isProtected = $signatureServices->isProtected($matricula);
+
+// Validar senha
+$isValid = $signatureServices->validatePassword($matricula, $senha);
+
+// Ler arquivo protegido
+$content = $signatureServices->readProtectedFile($matricula, 'assinatura.bin', $senha);
+```

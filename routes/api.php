@@ -29,4 +29,4 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
 Route::post('/', [SignatureController::class, 'index']);
 Route::get('/signature/{codigoVerificao}', [SignatureController::class, 'signature']);
 Route::get('/document/{id_documento}', [SignatureController::class, 'viewDocument']);
-Route::get('/verifySignature/{hash}', [SignatureController::class, 'verifySignature']);
+Route::get('/verifySignature', [SignatureController::class, 'verifySignature']);

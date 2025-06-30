@@ -42,40 +42,123 @@ class SignatureServices
         return compact('qrX', 'qrY', 'textX', 'textY');
     }
 
-    public function randomCode() {
-    return   str_pad(rand(10, 99), 2, '0', STR_PAD_LEFT) .
-       chr(rand(65, 90)) .'-' .
-       str_pad(rand(10, 99), 2, '0', STR_PAD_LEFT) .
-       chr(rand(65, 90)) . '-' .
-       str_pad(rand(10, 99), 2, '0', STR_PAD_LEFT) .
-       chr(rand(65, 90));
+    public function randomCode()
+    {
+        return   str_pad(rand(10, 99), 2, '0', STR_PAD_LEFT) .
+            chr(rand(65, 90)) . '-' .
+            str_pad(rand(10, 99), 2, '0', STR_PAD_LEFT) .
+            chr(rand(65, 90)) . '-' .
+            str_pad(rand(10, 99), 2, '0', STR_PAD_LEFT) .
+            chr(rand(65, 90));
     }
 
-    public function openSSL ($document, $matricula) {
+    /**
+     * Criptografa dados usando uma senha
+     */
+    private function encryptData($data, $password)
+    {
+        $key = hash('sha256', $password, true);
+        $iv = openssl_random_pseudo_bytes(16);
+        $encrypted = openssl_encrypt($data, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
+        return base64_encode($iv . $encrypted);
+    }
+
+    /**
+     * Descriptografa dados usando uma senha
+     */
+    private function decryptData($encryptedData, $password)
+    {
+        $data = base64_decode($encryptedData);
+        $iv = substr($data, 0, 16);
+        $encrypted = substr($data, 16);
+        $key = hash('sha256', $password, true);
+        return openssl_decrypt($encrypted, 'AES-256-CBC', $key, OPENSSL_RAW_DATA, $iv);
+    }
+
+    public function openSSL($data, $matricula, $documento = null, $senha = null)
+    {
         $privateKeyResource = openssl_pkey_new([
             "private_key_bits" => 2048,
             "private_key_type" => OPENSSL_KEYTYPE_RSA,
         ]);
+
         openssl_pkey_export($privateKeyResource, $privateKey);
         $publicKey = openssl_pkey_get_details($privateKeyResource)["key"];
 
-        $document = file_get_contents($document);
-        $md5Hash= md5($document);
-        $hash = hash("sha256", $document, true);
+        $conteudo = file_get_contents($documento);
 
-        openssl_private_encrypt($hash, $assinatura, $privateKey);
+        openssl_sign($conteudo, $assinatura, $privateKey, OPENSSL_ALGO_SHA256);
 
-        if (!is_dir($md5Hash)) {
-            mkdir($md5Hash, 0777, true);
+        if (!is_dir($matricula)) {
+            mkdir($matricula, 0777, true);
         }
 
-        file_put_contents("$md5Hash/assinatura.bin", $assinatura);
-        file_put_contents("$md5Hash/chave_publica.pem", $publicKey);
+        $assinaturaToSave = $assinatura;
+        $publicKeyToSave = $publicKey;
+        $conteudoToSave = $conteudo;
 
-        return $md5Hash;
+
+        file_put_contents("$matricula/assinatura.bin", $assinaturaToSave);
+        file_put_contents("$matricula/chave_publica.pem", $publicKeyToSave);
+        file_put_contents("$matricula/documento.pdf", $conteudoToSave);
+
+        return base64_encode($publicKey);
     }
 
-    public function verifySignature($hash, $matricula) {
+    /**
+     * Verifica se uma pasta está protegida por senha
+     */
+    public function isProtected($matricula)
+    {
+        return file_exists("$matricula/.protected");
+    }
+
+    /**
+     * Valida a senha de uma pasta protegida
+     */
+    public function validatePassword($matricula, $senha)
+    {
+        if (!$this->isProtected($matricula)) {
+            return true; // Pasta não protegida, sempre válida
+        }
+
+        $storedHash = file_get_contents("$matricula/.protected");
+        return hash('sha256', $senha) === $storedHash;
+    }
+
+    /**
+     * Lê um arquivo protegido da pasta do usuário
+     */
+    public function readProtectedFile($matricula, $fileName, $senha = null)
+    {
+        $filePath = "$matricula/$fileName";
+
+        if (!file_exists($filePath)) {
+            throw new \Exception("Arquivo não encontrado: $fileName");
+        }
+
+        $content = file_get_contents($filePath);
+
+        if ($this->isProtected($matricula)) {
+            if (!$senha) {
+                throw new \Exception("Senha é obrigatória para acessar arquivos protegidos");
+            }
+
+            if (!$this->validatePassword($matricula, $senha)) {
+                throw new \Exception("Senha incorreta");
+            }
+
+            $content = $this->decryptData($content, $senha);
+            if ($content === false) {
+                throw new \Exception("Erro ao descriptografar o arquivo");
+            }
+        }
+
+        return $content;
+    }
+
+    public function verifySignature($hash, $matricula)
+    {
         $assinatura = file_get_contents("$hash/assinatura.bin");
         $publicKey = file_get_contents("$hash/chave_publica.pem");
         $hashDocument = file_get_contents("$hash/hash.bin");
@@ -141,5 +224,4 @@ class SignatureServices
 
         return strtoupper($nome);
     }
-
 }
