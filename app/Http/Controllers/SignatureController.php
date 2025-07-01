@@ -694,7 +694,7 @@ class SignatureController extends Controller
     /**
      * Visualizar o documento PDF assinado original
      */
-    public function viewSignedDocument($codigo_transacao, Request $request)
+    public function viewSignedDocument($codigo_transacao)
     {
         try {
 
@@ -711,7 +711,6 @@ class SignatureController extends Controller
     private function calculateSuspicionScore($patterns)
     {
         $score = 0;
-
         // Pontuações por tipo de padrão suspeito
         $patternScores = [
             'file_too_recent' => 1,
