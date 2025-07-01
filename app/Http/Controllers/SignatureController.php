@@ -3,8 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Services\DocumentoBindingService;
+use App\Services\DeviceBindingService;
+use App\Services\DocumentoSecurityService;
+use App\Services\DocumentSecurityService;
 use App\Services\PrivacyService;
 use App\Services\SignatureServices;
+use App\Services\ZeroKnowlegdeService;
 use Illuminate\Http\Request;
 use setasign\Fpdi\Fpdi;
 use Illuminate\Support\Facades\Crypt;
@@ -13,6 +17,7 @@ use Illuminate\Support\Facades\Log;
 use Ramsey\Uuid\Uuid;
 use SimpleSoftwareIO\QrCode\Facades\QrCode;
 use Exception;
+
 
 class PDF_Rotate extends Fpdi
 {
@@ -71,21 +76,170 @@ class SignatureController extends Controller
         try {
             $entidade = $request->entidade;
             $cnpj = $request->cnpj;
+
+            $zk =  new ZeroKnowlegdeService();
             $signatureServices = new SignatureServices();
             $privacyService = new PrivacyService();
+
+
 
             // esse codigo vai verificar atividades suspeitas
             $documentoBindingService = new DocumentoBindingService();
 
+            // sistema de vinculação de dispositivos para segurança adicional
+            $deviceBindingService = new DeviceBindingService();
 
-            // Caso vem acontencer de um dia ter mais informações, aqui é onde deve ser adicionado
-            $nome = $request->nome;
-            $cpf = $request->cpf;
-            $cargo = $request->cargo;
-            $secretaria = $request->secretaria;
+
+            if ($request->has(['dados', 'iv'])) {
+                $dadosArrayInput = $request->input('dados');
+                $ivArrayInput = $request->input('iv');
+
+                $dadosArray = is_string($dadosArrayInput) ? json_decode($dadosArrayInput, true) : $dadosArrayInput;
+                $ivArray = is_string($ivArrayInput) ? json_decode($ivArrayInput, true) : $ivArrayInput;
+
+                if (!is_array($dadosArray) || !is_array($ivArray)) {
+                    throw new Exception('Dados criptografados inválidos - formato incorreto');
+                }
+
+                $senha = '';
+                foreach ($ivArray as $byte) {
+                    $senha .= chr($byte);
+                }
+
+                $dadosDescriptografados = $this->descriptografarDados($dadosArray, $ivArray, $senha);
+
+                $nome = $dadosDescriptografados['nome'] ?? null;
+                $cpf = $dadosDescriptografados['cpf'] ?? null;
+                $cargo = $dadosDescriptografados['cargo'] ?? null;
+                $secretaria = $dadosDescriptografados['secretaria'] ?? null;
+                $matricula = $dadosDescriptografados['matricula'] ?? null;
+                $entidade = $dadosDescriptografados['entidade'] ?? null;
+                Log::info('Dados descriptografados com sucesso', [
+                    'matricula' => $matricula,
+                    'cpf_partial' => $cpf ? substr($cpf, 0, 3) . '***' : null
+                ]);
+            } else {
+                $nome = $request->nome;
+                $cpf = $request->cpf;
+                $cargo = $request->cargo;
+                $secretaria = $request->secretaria;
+                $matricula = $request->matricula;
+            }
+
             $data_assinatura = $request->date ?? date('d/m/Y H:i:s');
-            $matricula = $request->matricula;
 
+
+            $zkAuth = $zk->createUserProof(
+                $matricula,
+                $cpf,
+                $request->senha ?? null
+            );
+
+            // === DEVICE BINDING - Verificação e registro de dispositivo ===
+            $deviceInfo = null;
+            try {
+                Log::info('Iniciando verificação de dispositivo', ['matricula' => $matricula]);
+
+                // Criar fingerprint do dispositivo
+                $deviceFingerprint = $deviceBindingService->createDevice($request);
+                Log::info('Device fingerprint criado', [
+                    'matricula' => $matricula,
+                    'fingerprint_preview' => substr($deviceFingerprint, 0, 8) . '...'
+                ]);
+
+                // Verificar se o dispositivo é confiável
+                $trustResult = $deviceBindingService->verifyDeviceTrust($matricula, $deviceFingerprint);
+
+                if (!$trustResult['trusted']) {
+                    Log::warning('Dispositivo não confiável detectado', [
+                        'matricula' => $matricula,
+                        'reason' => $trustResult['reason'],
+                        'device_fingerprint' => substr($deviceFingerprint, 0, 8) . '...'
+                    ]);
+
+                    // Se dispositivo não está registrado, registrá-lo automaticamente
+                    if ($trustResult['reason'] === 'device_not_registered') {
+                        $context = [
+                            'ip_address' => $request->ip(),
+                            'user_agent' => $request->header('User-Agent'),
+                            'timestamp' => now(),
+                            'registration_method' => 'auto_signature',
+                            'document_type' => 'pdf_signature',
+                            'entidade' => $entidade
+                        ];
+
+                        $deviceId = $deviceBindingService->registerDevide($matricula, $deviceFingerprint, $context);
+
+                        Log::info('Novo dispositivo registrado automaticamente', [
+                            'matricula' => $matricula,
+                            'device_id' => $deviceId
+                        ]);
+
+                        $deviceInfo = [
+                            'device_id' => $deviceId,
+                            'trust_level' => 1.0,
+                            'newly_registered' => true
+                        ];
+                    }
+                } else {
+                    Log::info('Dispositivo confiável verificado', [
+                        'matricula' => $matricula,
+                        'device_id' => $trustResult['device_id'],
+                        'trust_level' => $trustResult['trust_level']
+                    ]);
+
+                    $deviceInfo = [
+                        'device_id' => $trustResult['device_id'],
+                        'trust_level' => $trustResult['trust_level'],
+                        'newly_registered' => false
+                    ];
+                }
+
+                // Detectar atividade suspeita
+                $suspiciousActivity = $deviceBindingService->detectSuspiciousDeviceActivity($matricula, $deviceFingerprint);
+
+                if (!empty($suspiciousActivity)) {
+                    Log::warning('Atividade suspeita de dispositivo detectada', [
+                        'matricula' => $matricula,
+                        'indicators' => $suspiciousActivity,
+                        'device_fingerprint' => substr($deviceFingerprint, 0, 8) . '...'
+                    ]);
+
+                    // Se houver múltiplos indicadores suspeitos, rejeitar
+                    if (count($suspiciousActivity) >= 2) {
+                        Log::error('Documento rejeitado por atividade suspeita de dispositivo', [
+                            'matricula' => $matricula,
+                            'indicators' => $suspiciousActivity
+                        ]);
+
+                        throw new Exception('DOCUMENTO REJEITADO: Atividade suspeita detectada no dispositivo. Múltiplos indicadores de segurança foram acionados. Entre em contato com o suporte se você acredita que isso é um erro.');
+                    }
+
+                    if ($deviceInfo) {
+                        $deviceInfo['suspicious_indicators'] = $suspiciousActivity;
+                    }
+                }
+
+            } catch (Exception $deviceException) {
+                Log::error('Erro na verificação de dispositivo', [
+                    'matricula' => $matricula,
+                    'error' => $deviceException->getMessage(),
+                    'trace' => $deviceException->getTraceAsString()
+                ]);
+
+                // Se foi erro de rejeição por atividade suspeita, propagar
+                if (strpos($deviceException->getMessage(), 'DOCUMENTO REJEITADO') !== false) {
+                    throw $deviceException;
+                }
+
+                // Para outros erros, continuar mas registrar que houve problema
+                $deviceInfo = [
+                    'device_id' => 'ERROR_' . time(),
+                    'trust_level' => 0,
+                    'error' => true,
+                    'error_message' => $deviceException->getMessage()
+                ];
+            }
 
             if (!$request->hasFile('pdf')) {
                 return response()->json(['error' => 'No PDF file provided'], 400)
@@ -162,6 +316,41 @@ class SignatureController extends Controller
                     'cargo' => $cargo,
                 ]);
 
+                // Integrar device binding com document binding se disponível
+                if ($deviceInfo && !empty($deviceInfo['device_id']) && !isset($deviceInfo['error'])) {
+                    try {
+                        Log::info('Integrando device binding com document binding', [
+                            'matricula' => $matricula,
+                            'device_id' => $deviceInfo['device_id']
+                        ]);
+
+                        $deviceEnhancement = $deviceBindingService->enhanceDocumentBinding(
+                            $pdfPath,
+                            ['matricula' => $matricula],
+                            $deviceFingerprint ?? null
+                        );
+
+                        $binding['device_info'] = $deviceEnhancement;
+
+                        Log::info('Device binding integrado com sucesso ao documento', [
+                            'matricula' => $matricula,
+                            'device_id' => $deviceEnhancement['device_id'],
+                            'trust_level' => $deviceEnhancement['trust_level']
+                        ]);
+
+                    } catch (Exception $deviceIntegrationException) {
+                        Log::error('Erro ao integrar device binding com document binding', [
+                            'matricula' => $matricula,
+                            'error' => $deviceIntegrationException->getMessage()
+                        ]);
+
+                        // Se foi rejeição por device suspeito, propagar erro
+                        if (strpos($deviceIntegrationException->getMessage(), 'DOCUMENTO REJEITADO') !== false) {
+                            throw $deviceIntegrationException;
+                        }
+                    }
+                }
+
                 Log::info('Document binding criado com sucesso', [
                     'binding_id' => $binding['binding_id'] ?? 'não definido',
                     'validation_code' => $binding['validation_code'] ?? 'não definido',
@@ -185,23 +374,23 @@ class SignatureController extends Controller
             }
 
 
-
             // $md5Hash = md5($pdfPath);
             $codigoVerificao = $signatureServices->randomCode();
 
             $token = $privacyService->secureData(
                 array(
+                    'nome' => $nome,
                     'entidade' => $entidade,
-                    'chave_publica' => $chave_publica,
-                    'matricula' => $matricula,
+                    'chave_publica' => $chave_publica['public_key'],
+                    'document_id' => $chave_publica['document_id'],
                     'codigo_transacao' => $codigoTransacao,
                     'dta_ass' => $data_assinatura,
                 )
             );
 
-
             // Gerar o qrcode
-            $qrImage = QrCode::format('png')->size(500)->generate('http://192.168.18.243:8001/api/verifySignature?token=' . $token);
+            // $qrImage = QrCode::format('png')->size(500)->generate('http://192.168.18.243:8001/api/verifySignature?token=' . $token . '&zk=' . $zkAuth['zk_token']);
+            $qrImage = QrCode::format('png')->size(500)->generate('http://192.168.18.243:8000/'.$entidade.'/services/signature/confirmation-signature?token=' . $token . '&zk=' . $zkAuth['zk_token']);
             $qrData = 'data://text/plain;base64,' . base64_encode($qrImage);
 
             $repeat = $request->input('repeat', false);
@@ -267,7 +456,10 @@ class SignatureController extends Controller
                 ->header('Id-Documento', $codigoTransacao)
                 ->header('Document-Binding-Id', $binding['binding_id'])
                 ->header('Validation-Code', $binding['validation_code'])
-                ->header('Access-Control-Expose-Headers', 'verification-code, id-documento, document-binding-id, validation-code') // Expor todos os headers para o cliente
+                ->header('Device-Id', $deviceInfo['device_id'] ?? 'not-available')
+                ->header('Device-Trust-Level', $deviceInfo['trust_level'] ?? '0')
+                ->header('Device-Newly-Registered', $deviceInfo['newly_registered'] ?? 'false')
+                ->header('Access-Control-Expose-Headers', 'verification-code, id-documento, document-binding-id, validation-code, device-id, device-trust-level, device-newly-registered') // Expor todos os headers para o cliente
                 ->header('Access-Control-Allow-Origin', '*')
                 ->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
                 ->header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
@@ -276,7 +468,6 @@ class SignatureController extends Controller
                 unlink($tempPath);
             }
 
-            // Se for rejeição por suspeição, retornar erro 400 (Bad Request)
             if (strpos($e->getMessage(), 'DOCUMENTO REJEITADO') !== false) {
                 return response()->json([
                     'error' => $e->getMessage(),
@@ -288,7 +479,6 @@ class SignatureController extends Controller
                     ->header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
             }
 
-            // Para outros erros, retornar erro 500
             return response()->json([
                 'error' => 'Error processing PDF: ' . $e->getMessage()
             ], 500)
@@ -301,39 +491,87 @@ class SignatureController extends Controller
     public function verifySignature(Request $request)
     {
         $token = $request->input('token');
+        $zkToken = $request->input('zk');
 
-        $data = DB::table('acl_secure_token')->where('token', $token)->first();
 
-        if (!$data) {
-            throw new Exception('Não existe nenhum documento assinado digitalmente com esse token.');
+        $zkRecord = DB::table('acl_zero_knowledge')->where('token', $zkToken)->first();
+        if (!$zkRecord || now() > $zkRecord->expires_at) {
+            throw new Exception('Token de autenticação inválido ou expirado');
         }
 
-        $data = Crypt::decrypt($data->encrypted_data);
+        $tokenData = DB::table('acl_secure_token')->where('token', $token)->first();
+        if (!$tokenData) {
+            throw new Exception('Documento não encontrado');
+        }
 
-        $publicKey = base64_decode($data['chave_publica']);
+        $data = Crypt::decrypt($tokenData->encrypted_data);
 
-        $assinatura = file_get_contents($data['matricula'] . "/assinatura.bin");
-        $documento = file_get_contents($data['matricula'] . "/documento.pdf");
+        if ($request->has(['verificar_cpf', 'verificar_matricula'])) {
+            $userInfo = [
+                'matricula' => $request->verificar_matricula,
+                'cpf' => $request->verificar_cpf
+            ];
 
-        $resultado = openssl_verify($documento, $assinatura, $publicKey, OPENSSL_ALGO_SHA256);
+            $securityService = new DocumentoSecurityService();
+            $documentData = $securityService->retrieveDocument($data['document_id'], $userInfo);
 
+            if (!$documentData) {
+                throw new Exception('Acesso negado - dados incorretos');
+            }
 
-        if ($resultado === 1) {
+            $publicKey = $documentData['public_key'];
+            $resultado = openssl_verify(
+                $documentData['document'],
+                $documentData['signature'],
+                $publicKey,
+                OPENSSL_ALGO_SHA256
+            );
+
+            if ($resultado === 1) {
+                // return response()->json([
+                //     'success' => true,
+                //     'message' => 'Documento valido',
+                //     'data' => array(
+                //         'nome' => $data['nome'],
+                //         'codigo_transacao' => $data['codigo_transacao'],
+                //         'dta_ass' => $data['dta_ass'],
+                //         'entidade' => $data['entidade'],
+                //     )
+                // ], 200);
+                return view('pagamento-aprovado', [
+                    'nome' => $data['nome'],
+                    'codigo_transacao' => $data['codigo_transacao'],
+                    'dta_ass' => $data['dta_ass'],
+                    'verificacao_completa' => true
+                ]);
+            }
+        }
+
+        $securityService = new DocumentoSecurityService();
+        if ($securityService->verifyDocumentIntegrity($data['document_id'])) {
+            // return response()->json([
+            //     'success' => true,
+            //     'message' => 'Documento valido',
+            //     'data' => array(
+            //         'nome' => $data['nome'],
+            //         'codigo_transacao' => $data['codigo_transacao'],
+            //         'dta_ass' => $data['dta_ass'],
+            //         'entidade' => $data['entidade'],
+            //     )
+            // ], 200);
             return view('pagamento-aprovado', [
+                'nome' => $data['nome'],
                 'codigo_transacao' => $data['codigo_transacao'],
                 'dta_ass' => $data['dta_ass'],
-                'nome' => $data['nome'] ?? 'VITOR EMANUEL PIRES DE OLIVEIRA',
+                'documento_valido' => true
             ]);
-        } else {
-            return response()->json([
-                'error' => 'Documento não autenticado',
-                'type' => 'document_rejected',
-                'reason' => 'suspicious_content_detected'
-            ], 400)
-                ->header('Access-Control-Allow-Origin', '*')
-                ->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-                ->header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
         }
+
+        return response()->json([
+            'success' => false,
+            'message' => 'Documento inválido'
+        ], 400);
+        // throw new Exception('Documento inválido');
     }
 
     public function signature($codigoVerificao, Request $request)
@@ -379,23 +617,51 @@ class SignatureController extends Controller
     public function viewDocument($id_documento)
     {
         try {
-            $fpdi = new Fpdi();
-            $fpdi->AddPage();
-            $fpdi->SetFont('helvetica', 'B', 16);
-            $fpdi->Cell(0, 20, 'DOCUMENTO ASSINADO DIGITALMENTE', 0, 1, 'C');
+            // Verificar se o documento existe nas tabelas de tokens seguros
+            $tokenData = DB::table('acl_secure_token')
+                ->where('encrypted_data', 'LIKE', '%"codigo_transacao":"' . $id_documento . '"%')
+                ->first();
 
-            $fpdi->SetFont('helvetica', '', 12);
-            $fpdi->Cell(0, 10, 'ID do Documento: ' . $id_documento, 0, 1, 'L');
-            $fpdi->Cell(0, 10, 'Data de Assinatura: ' . date('d/m/Y H:i:s'), 0, 1, 'L');
-            $fpdi->Cell(0, 10, 'Signatario: VITOR EMANUEL PIRES DE OLIVEIRA', 0, 1, 'L');
-            $fpdi->Cell(0, 10, 'CPF: 123.456.789-01', 0, 1, 'L');
-            $fpdi->Cell(0, 10, 'Cargo: Analista de Sistemas', 0, 1, 'L');
-            $fpdi->Cell(0, 10, 'Secretaria: Secretaria de Estado de Planejamento e Orcamento', 0, 1, 'L');
-            $fpdi->Cell(0, 10, 'Matricula: 123456', 0, 1, 'L');
+            if ($tokenData) {
+                // Documento encontrado nos tokens seguros - mostrar informações básicas
+                $data = Crypt::decrypt($tokenData->encrypted_data);
 
-            $fpdi->Ln(10);
-            $fpdi->SetFont('helvetica', 'B', 12);
-            $fpdi->Cell(0, 10, 'Este documento foi assinado digitalmente e e valido para todos os fins legais.', 0, 1, 'C');
+                $fpdi = new Fpdi();
+                $fpdi->AddPage();
+                $fpdi->SetFont('helvetica', 'B', 16);
+                $fpdi->Cell(0, 20, 'DOCUMENTO ASSINADO DIGITALMENTE', 0, 1, 'C');
+
+                $fpdi->SetFont('helvetica', '', 12);
+                $fpdi->Cell(0, 10, 'ID do Documento: ' . $id_documento, 0, 1, 'L');
+                $fpdi->Cell(0, 10, 'Data de Assinatura: ' . ($data['dta_ass'] ?? date('d/m/Y H:i:s')), 0, 1, 'L');
+                $fpdi->Cell(0, 10, 'Signatario: ' . strtoupper($data['nome'] ?? 'NAO INFORMADO'), 0, 1, 'L');
+                $fpdi->Cell(0, 10, 'Entidade: ' . strtoupper($data['entidade'] ?? 'NAO INFORMADO'), 0, 1, 'L');
+
+                $fpdi->Ln(10);
+                $fpdi->SetFont('helvetica', 'B', 12);
+                $fpdi->Cell(0, 10, 'Este documento foi assinado digitalmente e e valido para todos os fins legais.', 0, 1, 'C');
+
+                $fpdi->Ln(5);
+                $fpdi->SetFont('helvetica', '', 10);
+                $fpdi->Cell(0, 10, 'Para verificar a integridade completa, use o QR Code presente no documento original.', 0, 1, 'C');
+
+            } else {
+                // Documento não encontrado - mostrar página de erro
+                $fpdi = new Fpdi();
+                $fpdi->AddPage();
+                $fpdi->SetFont('helvetica', 'B', 16);
+                $fpdi->SetTextColor(255, 0, 0);
+                $fpdi->Cell(0, 20, 'DOCUMENTO NAO ENCONTRADO', 0, 1, 'C');
+
+                $fpdi->SetFont('helvetica', '', 12);
+                $fpdi->SetTextColor(0, 0, 0);
+                $fpdi->Cell(0, 10, 'ID do Documento: ' . $id_documento, 0, 1, 'L');
+                $fpdi->Cell(0, 10, 'Status: Documento nao localizado no sistema', 0, 1, 'L');
+
+                $fpdi->Ln(10);
+                $fpdi->SetFont('helvetica', 'B', 12);
+                $fpdi->Cell(0, 10, 'Verifique se o ID do documento esta correto.', 0, 1, 'C');
+            }
 
             $output = $fpdi->Output('S');
 
@@ -412,6 +678,30 @@ class SignatureController extends Controller
                 ->header('Access-Control-Allow-Origin', '*')
                 ->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
                 ->header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+        }
+    }
+
+    /**
+     * Exibe página para visualização segura do documento
+     */
+    public function showDocumentViewer($id_documento)
+    {
+        return view('view-document', [
+            'id_documento' => $id_documento
+        ]);
+    }
+
+    /**
+     * Visualizar o documento PDF assinado original
+     */
+    public function viewSignedDocument($codigo_transacao, Request $request)
+    {
+        try {
+
+            var_dump($codigo_transacao);
+            die();
+        } catch (Exception $e) {
+
         }
     }
 
@@ -479,7 +769,6 @@ class SignatureController extends Controller
             }
         }
 
-        // Verificar se contém principalmente imagens (típico de print)
         $hasImages = strpos($content, '/Image') !== false;
         $hasText = strpos($content, '/Font') !== false || strpos($content, '/Text') !== false;
 
@@ -488,13 +777,11 @@ class SignatureController extends Controller
                 'filename' => $fileName
             ]);
 
-            // Se é só imagem, muito provavelmente é print
             throw new Exception('DOCUMENTO REJEITADO: PDF contém apenas imagens sem texto. Isso indica um print/screenshot. Envie o documento PDF original com texto selecionável.');
         }
 
-        // Verificar tamanho do arquivo vs conteúdo (prints tendem a ser grandes)
         $fileSize = filesize($pdfPath);
-        if ($fileSize > 5 * 1024 * 1024 && !$hasText) { // Maior que 5MB sem texto
+        if ($fileSize > 5 * 1024 * 1024 && !$hasText) {
             Log::error('PDF grande sem conteúdo textual - REJEITADO como imagem convertida', [
                 'size_mb' => round($fileSize / (1024 * 1024), 2),
                 'filename' => $fileName
@@ -503,13 +790,71 @@ class SignatureController extends Controller
             throw new Exception('DOCUMENTO REJEITADO: PDF muito grande (' . round($fileSize / (1024 * 1024), 1) . 'MB) sem texto. Isso indica conversão de imagem/print para PDF. Envie o documento original.');
         }
 
-        // Verificar se arquivo foi modificado muito recentemente (indica conversão recente)
         $fileAge = time() - filemtime($pdfPath);
-        if ($fileAge < 60) { // Menos de 1 minuto
+        if ($fileAge < 60) {
             Log::warning('PDF criado há poucos segundos - possível conversão de print', [
                 'age_seconds' => $fileAge,
                 'filename' => $fileName
             ]);
+        }
+    }
+
+    /**
+     * Descriptografa dados AES-GCM enviados do frontend
+     */
+        private function descriptografarDados($dadosArray, $ivArray, $senha)
+    {
+        try {
+            $dadosCriptografados = '';
+            foreach ($dadosArray as $byte) {
+                $dadosCriptografados .= chr($byte);
+            }
+
+            // Se a senha vem no IV, então o IV real precisa ser extraído dos dados ou gerado
+            // Vamos extrair o IV dos primeiros 12 bytes dos dados criptografados
+            $ivLength = 12; // AES-GCM usa IV de 12 bytes
+            $iv = substr($dadosCriptografados, 0, $ivLength);
+            $dadosCriptografadosReal = substr($dadosCriptografados, $ivLength);
+
+            $salt = "f891350c35fb47cc1557f441b5fdfa04";
+            $iterations = 100000;
+            $keyLength = 32; // 256 bits
+
+            $chave = hash_pbkdf2('sha256', $senha, $salt, $iterations, $keyLength, true);
+
+            $tagLength = 16;
+            $ciphertext = substr($dadosCriptografadosReal, 0, -$tagLength);
+            $tag = substr($dadosCriptografadosReal, -$tagLength);
+
+            $dadosDescriptografados = openssl_decrypt(
+                $ciphertext,
+                'aes-256-gcm',
+                $chave,
+                OPENSSL_RAW_DATA,
+                $iv,
+                $tag
+            );
+
+            if ($dadosDescriptografados === false) {
+                throw new Exception('Falha na descriptografia - dados ou senha inválidos');
+            }
+
+            $dados = json_decode($dadosDescriptografados, true);
+
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                throw new Exception('Erro ao decodificar JSON: ' . json_last_error_msg());
+            }
+
+            return $dados;
+
+        } catch (Exception $e) {
+            Log::error('Erro na descriptografia AES-GCM', [
+                'error' => $e->getMessage(),
+                'dados_length' => count($dadosArray),
+                'iv_length' => count($ivArray),
+                'senha_length' => strlen($senha)
+            ]);
+            throw new Exception('Erro na descriptografia: ' . $e->getMessage());
         }
     }
 }

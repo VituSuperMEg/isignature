@@ -206,9 +206,9 @@
             </div>
         </div>
 
-        <a href="{{ $url_comprovante ?? '#' }}" class="download-btn">
-            <i class="fas fa-download" style="margin-right: 8px;"></i>
-            Baixar documento
+        <a href="http://192.168.18.243:8001/api/signed-document/{{ $codigo_transacao }}" target="_blank" class="download-btn">
+            <i class="fas fa-eye" style="margin-right: 8px;"></i>
+            Visualizar documento
         </a>
 
         <div class="footer">

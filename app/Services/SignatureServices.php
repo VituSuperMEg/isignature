@@ -86,25 +86,27 @@ class SignatureServices
         $publicKey = openssl_pkey_get_details($privateKeyResource)["key"];
 
         $conteudo = file_get_contents($documento);
-
         openssl_sign($conteudo, $assinatura, $privateKey, OPENSSL_ALGO_SHA256);
 
-        if (!is_dir($matricula)) {
-            mkdir($matricula, 0777, true);
-        }
+        $securityService = new DocumentoSecurityService();
 
-        $assinaturaToSave = $assinatura;
-        $publicKeyToSave = $publicKey;
-        $conteudoToSave = $conteudo;
+        $userInfo = [
+            'matricula' => $matricula,
+            'cpf' => $data['cpf']
+        ];
 
+        $documentId = $securityService->secureDocument(
+            $conteudo,
+            $userInfo,
+            $assinatura,
+            $publicKey
+        );
 
-        file_put_contents("$matricula/assinatura.bin", $assinaturaToSave);
-        file_put_contents("$matricula/chave_publica.pem", $publicKeyToSave);
-        file_put_contents("$matricula/documento.pdf", $conteudoToSave);
-
-        return base64_encode($publicKey);
+        return [
+            'public_key' => base64_encode($publicKey),
+            'document_id' => $documentId
+        ];
     }
-
     /**
      * Verifica se uma pasta está protegida por senha
      */
