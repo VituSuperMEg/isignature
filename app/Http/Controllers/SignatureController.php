@@ -393,57 +393,45 @@ class SignatureController extends Controller
             $qrImage = QrCode::format('png')->size(500)->generate('http://192.168.18.243:8000/'.$entidade.'/services/signature/confirmation-signature?token=' . $token . '&zk=' . $zkAuth['zk_token']);
             $qrData = 'data://text/plain;base64,' . base64_encode($qrImage);
 
-            $repeat = $request->input('repeat', false);
-
+                        // Importar todas as páginas originais do documento SEM QR code
             for ($pageNo = 1; $pageNo <= $pageCount; $pageNo++) {
                 $template = $fpdi->importPage($pageNo);
                 $fpdi->addPage();
                 $fpdi->useTemplate($template);
+            }
 
-                if ($repeat || $pageNo === $pageCount) {
-                    $pageHeight = $fpdi->GetPageHeight();
-                    $pageWidth = $fpdi->GetPageWidth();
-                    $margin = 10;
-                    $lineHeight = 4;
-                    $qrWidth = 20;
-                    $qrHeight = 20;
+                        // Adicionar uma última página dedicada ao QR code no formato vertical original
+            $fpdi->addPage();
+            $pageHeight = $fpdi->GetPageHeight();
+            $pageWidth = $fpdi->GetPageWidth();
 
-                    $fpdi->setFont('helvetica', '', 6);
-                    $textLines = [
-                        "DOCUMENTO ASSINADO DIGITALMENTE. CODIGO {$codigoVerificao} - DATA DA ASSINATURA: {$data_assinatura}",
-                        strtoupper($nome) . " CPF: " . $signatureServices->formataCnpjCpf($cpf) . " MATRICULA: {$matricula}",
-                        "CARGO: " . strtoupper($cargo) . " ORGAO:" . $signatureServices->removeCaracteresEspeciais($secretaria, ' '),
-                        "APONTE SUA CAMARA PARA O QRCODE PARA VERIFICAR AUTENTICIDADE.",
-                    ];
-                    $totalTextBlockWidth = (count($textLines) - 1) * $lineHeight;
+            // Usar as mesmas configurações do QR code vertical original
+            $margin = 10;
+            $lineHeight = 4;
+            $qrWidth = 20;
+            $qrHeight = 20;
 
-                    // --- Bloco da Direita ---
-                    // $qrX_right = $pageWidth - $qrWidth - $margin;
-                    $qrY_common = $pageHeight - $qrHeight - $margin;
-                    // $fpdi->Image($qrData, $qrX_right, $qrY_common, $qrWidth, $qrHeight, 'png');
+            $fpdi->setFont('helvetica', '', 6);
+            $textLines = [
+                "DOCUMENTO ASSINADO DIGITALMENTE. CODIGO {$codigoVerificao} - DATA DA ASSINATURA: {$data_assinatura}",
+                strtoupper($nome) . " MATRICULA: {$matricula}",
+                "CARGO: " . strtoupper($cargo) . " ORGAO:" . $signatureServices->removeCaracteresEspeciais($secretaria, ' '),
+                "APONTE SUA CAMARA PARA O QRCODE PARA VERIFICAR AUTENTICIDADE.",
+            ];
+            $totalTextBlockWidth = (count($textLines) - 1) * $lineHeight;
 
-                    // $textBlockY_right = $qrY_common - 2;
-                    // $textBlockStartX_right = $qrX_right + ($qrWidth / 2) - ($totalTextBlockWidth / 2);
+            // Posicionar no canto inferior esquerdo (mesmo formato original)
+            $qrX_left = $margin;
+            $qrY_common = $pageHeight - $qrHeight - $margin;
+            $fpdi->Image($qrData, $qrX_left, $qrY_common, $qrWidth, $qrHeight, 'png');
 
-                    // $currentX_right = $textBlockStartX_right;
-                    // foreach ($textLines as $line) {
-                    //     $fpdi->RotatedText($currentX_right, $textBlockY_right, $line, 90);
-                    //     $currentX_right += $lineHeight;
-                    // }
+            $textBlockY_left = $qrY_common - 2;
+            $textBlockStartX_left = $qrX_left + ($qrWidth / 2) - ($totalTextBlockWidth / 2) - 1;
 
-                    // --- Bloco da Esquerda ---
-                    $qrX_left = $margin;
-                    $fpdi->Image($qrData, $qrX_left, $qrY_common, $qrWidth, $qrHeight, 'png');
-
-                    $textBlockY_left = $qrY_common - 2;
-                    $textBlockStartX_left = $qrX_left + ($qrWidth / 2) - ($totalTextBlockWidth / 2) - 1;
-
-                    $currentX_left = $textBlockStartX_left;
-                    foreach ($textLines as $line) {
-                        $fpdi->RotatedText($currentX_left, $textBlockY_left, $line, 90);
-                        $currentX_left += $lineHeight;
-                    }
-                }
+            $currentX_left = $textBlockStartX_left;
+            foreach ($textLines as $line) {
+                $fpdi->RotatedText($currentX_left, $textBlockY_left, $line, 90);
+                $currentX_left += $lineHeight;
             }
 
             $output = $fpdi->Output('S');
@@ -697,7 +685,6 @@ class SignatureController extends Controller
     public function viewSignedDocument($codigo_transacao)
     {
         try {
-
             var_dump($codigo_transacao);
             die();
         } catch (Exception $e) {
