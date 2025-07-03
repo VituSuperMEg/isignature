@@ -128,6 +128,22 @@ class SignatureController extends Controller
 
             $data_assinatura = $request->date ?? date('d/m/Y H:i:s');
 
+            $signAllPagesRaw = $request->input('sign_all_pages', true);
+            $selectedPagesRaw = $request->input('selected_pages', []);
+
+            if (is_string($signAllPagesRaw)) {
+                $signAllPages = !in_array(strtolower($signAllPagesRaw), ['false', '0', 'no', 'off']);
+            } else {
+                $signAllPages = (bool) $signAllPagesRaw;
+            }
+
+            // Processar selected_pages
+            $selectedPages = $selectedPagesRaw;
+            if (is_string($selectedPages)) {
+                $selectedPages = explode(',', $selectedPages);
+            } elseif (!is_array($selectedPages)) {
+                $selectedPages = [$selectedPages];
+            }
 
             $zkAuth = $zk->createUserProof(
                 $matricula,
@@ -265,6 +281,35 @@ class SignatureController extends Controller
             $pageCount = $fpdi->setSourceFile($tempPath);
             $uuid = Uuid::uuid4();
 
+            // Validar páginas selecionadas
+            if (!$signAllPages) {
+                if (empty($selectedPages)) {
+                    throw new Exception('Quando sign_all_pages for false, selected_pages deve conter ao menos uma página');
+                }
+
+                // Validar se as páginas existem no documento
+                $selectedPages = array_map('intval', $selectedPages);
+                $selectedPages = array_filter($selectedPages, function($page) use ($pageCount) {
+                    return $page >= 1 && $page <= $pageCount;
+                });
+
+                if (empty($selectedPages)) {
+                    throw new Exception("Nenhuma página válida selecionada. O documento possui {$pageCount} página(s)");
+                }
+
+                sort($selectedPages); // Ordenar as páginas
+
+                Log::info('Assinatura em páginas específicas', [
+                    'matricula' => $matricula,
+                    'total_pages' => $pageCount,
+                    'selected_pages' => $selectedPages
+                ]);
+            } else {
+                Log::info('Assinatura em todas as páginas', [
+                    'matricula' => $matricula,
+                    'total_pages' => $pageCount
+                ]);
+            }
 
             $codigoTransacao = $uuid->toString();
 
@@ -394,73 +439,99 @@ class SignatureController extends Controller
             $addWatermark = true;
             $watermarkPosition = $request->input('watermark_position', 'right');
 
+            // Processar TODAS as páginas, mas assinar apenas as selecionadas
             for ($pageNo = 1; $pageNo <= $pageCount; $pageNo++) {
+                $shouldSign = $signAllPages || in_array($pageNo, $selectedPages);
                 $template = $fpdi->importPage($pageNo);
                 $fpdi->addPage();
                 $fpdi->useTemplate($template);
 
-                $fpdi->setFont('helvetica', 'B', 8);
-                $fpdi->SetTextColor(0, 0, 0);
+                // Aplicar assinatura apenas se esta página deve ser assinada
+                if ($shouldSign) {
+                    $fpdi->SetTextColor(0, 0, 0);
 
-                                $pageHeight = $fpdi->GetPageHeight();
 
-                // Posições dos dois blocos
-                $blocoEsquerdoX = 110;
-                $blocoDireitoX = 150;
-                $watermarkY = $pageHeight - 38;
-                $lineHeight = 3.1;
+                    $pageHeight = $fpdi->GetPageHeight();
+                    $pageWidth = $fpdi->GetPageWidth();
 
-                // === BLOCO 1 (ESQUERDO) ===
-                // Quebrar o nome em linhas se necessário (largura máxima: 45 unidades)
-                $nomeLinhas = $this->breakText(strtoupper($nome) .  ':' . '080.000.000-00', 37, $fpdi);
+                    $margemInferior = 12;
+                    $margemDireita = 10;
 
-                $currentY = $watermarkY;
-                foreach ($nomeLinhas as $linha) {
-                    $fpdi->SetXY($blocoEsquerdoX, $currentY);
-                    $fpdi->Cell(50, $lineHeight, $linha, 0, 0, 'L');
-                    $currentY += $lineHeight;
+                    $larguraMaximaBlocoEsquerdo = 33;
+                    $larguraMaximaBlocoDireito = 85;
+
+                    $blocoEsquerdoX = $pageWidth * 0.45;
+                    $blocoDireitoX = $blocoEsquerdoX + $larguraMaximaBlocoEsquerdo;
+
+                    if ($blocoDireitoX + $larguraMaximaBlocoDireito > $pageWidth - $margemDireita) {
+                        $blocoDireitoX = $pageWidth - $larguraMaximaBlocoDireito - $margemDireita;
+                        $blocoEsquerdoX = $blocoDireitoX - $larguraMaximaBlocoEsquerdo + 40;
+                    }
+
+                    if ($blocoEsquerdoX < 10) {
+                        $blocoEsquerdoX = 400;
+                        $blocoDireitoX = $blocoEsquerdoX + $larguraMaximaBlocoEsquerdo;
+                    }
+
+                    $watermarkY = $pageHeight - $margemInferior - 25;
+
+                    // === BLOCO 1 (ESQUERDO) ===
+                    $fpdi->setFont('helvetica', 'B', 10);
+                    $lineHeight = 4;
+
+                    // Nome e matrícula juntos como na imagem
+                    $nomeMatricula = strtoupper($nome) . ':' . $matricula;
+                    $nomeLinhas = $this->breakText($nomeMatricula, 30, $fpdi);
+
+                    $currentY = $watermarkY;
+                    foreach ($nomeLinhas as $linha) {
+                        // Verificar se ainda cabe na página
+                        if ($currentY + $lineHeight <= $pageHeight - $margemInferior) {
+                            $fpdi->SetXY($blocoEsquerdoX, $currentY);
+                            $fpdi->Cell(50, $lineHeight, $linha, 0, 0, 'L');
+                            $currentY += $lineHeight;
+                        }
+                    }
+
+                    $blocoDireitoX = $fpdi->GetPageWidth() - 55;
+                    // === BLOCO 2 (DIREITO) ===
+                    $fpdi->setFont('helvetica', 'B', 9);
+                    $lineHeight = 3.2;
+
+                    $currentYRight = $watermarkY;
+
+                    if ($currentYRight + $lineHeight <= $pageHeight - $margemInferior) {
+                        $fpdi->SetXY($blocoDireitoX, $currentYRight);
+                        $fpdi->Cell(90, $lineHeight, 'Assinado de forma digital', 0, 0, 'L');
+                        $currentYRight += $lineHeight;
+                    }
+
+                    $porTexto = 'por ' . strtoupper($nome) . ':' . $matricula;
+                    $porLinhas = $this->breakText($porTexto, 50, $fpdi);
+
+                    foreach ($porLinhas as $linha) {
+                        if ($currentYRight + $lineHeight <= $pageHeight - $margemInferior) {
+                            $fpdi->SetXY($blocoDireitoX, $currentYRight);
+                            $fpdi->Cell(90, $lineHeight, $linha, 0, 0, 'L');
+                            $currentYRight += $lineHeight;
+                        }
+                    }
+
+                    if ($currentYRight + $lineHeight <= $pageHeight - $margemInferior) {
+                        $fpdi->SetXY($blocoDireitoX, $currentYRight);
+                        $dataFormatada = date('Y.m.d', strtotime($data_assinatura));
+                        $fpdi->Cell(90, $lineHeight, 'Dados: ' . $dataFormatada, 0, 0, 'L');
+                        $currentYRight += $lineHeight;
+                    }
+
+                    if ($currentYRight + $lineHeight <= $pageHeight - $margemInferior) {
+                        $fpdi->SetXY($blocoDireitoX, $currentYRight);
+                        $horarioFormatado = date('H:i:s', strtotime($data_assinatura)) . ' -03\'00\'';
+                        $fpdi->Cell(90, $lineHeight, $horarioFormatado, 0, 0, 'L');
+                    }
                 }
-
-                // // Linha seguinte: ENTIDADE:MATRICULA
-                // $fpdi->SetXY($blocoEsquerdoX, $currentY);
-                // $fpdi->Cell(50, $lineHeight, ':' . $matricula, 0, 0, 'L');
-
-                // === BLOCO 2 (DIREITO) ===
-                $currentYRight = $watermarkY;
-
-                // Linha 1: "Assinado de forma digital"
-                $fpdi->SetXY($blocoDireitoX, $currentYRight);
-                $fpdi->Cell(60, $lineHeight, 'Assinado de forma digital', 0, 0, 'L');
-                $currentYRight += $lineHeight;
-
-                // Linha 2+: "por NOME:" - quebrar se necessário (largura máxima: 55 unidades)
-                $porTexto = 'por ' . strtoupper($nome) . ':';
-                $porLinhas = $this->breakText($porTexto, 55, $fpdi);
-
-                foreach ($porLinhas as $linha) {
-                    $fpdi->SetXY($blocoDireitoX, $currentYRight);
-                    $fpdi->Cell(60, $lineHeight, $linha, 0, 0, 'L');
-                    $currentYRight += $lineHeight;
-                }
-
-                // Linha seguinte: ENTIDADE:CPF (se disponível)
-                $fpdi->SetXY($blocoDireitoX, $currentYRight);
-                $fpdi->Cell(60, $lineHeight, $cpf ?? '080.000.000-00', 0, 0, 'L');
-                $currentYRight += $lineHeight;
-
-                // Linha seguinte: Data
-                $fpdi->SetXY($blocoDireitoX, $currentYRight);
-                $dataFormatada = date('Y.m.d H:i:s', strtotime($data_assinatura));
-                $fpdi->Cell(60, $lineHeight, 'Dados: ' . $dataFormatada, 0, 0, 'L');
-                $currentYRight += $lineHeight;
-
-                // Linha seguinte: Horário
-                $fpdi->SetXY($blocoDireitoX, $currentYRight);
-                $horarioFormatado = date('H:i:s -03\'00', strtotime($data_assinatura));
-                $fpdi->Cell(60, $lineHeight, $horarioFormatado, 0, 0, 'L');
             }
 
-            // Adicionar uma última página dedicada ao QR code no formato vertical original
             $fpdi->addPage();
             $pageHeight = $fpdi->GetPageHeight();
             $pageWidth = $fpdi->GetPageWidth();
@@ -492,7 +563,6 @@ class SignatureController extends Controller
                             $lines[] = $currentLine;
                             $currentLine = $word;
                         } else {
-                            // Palavra muito longa, adicionar mesmo assim
                             $lines[] = $word;
                         }
                     }
@@ -508,7 +578,6 @@ class SignatureController extends Controller
             $textLines = [];
             $textLines[] = "DOCUMENTO ASSINADO DIGITALMENTE. CODIGO {$codigoVerificao} - DATA DA ASSINATURA: {$data_assinatura}";
 
-            // Quebrar a linha do nome e matrícula se necessário
             $nomeMatriculaTexto = strtoupper($nome) . " MATRICULA: {$matricula}";
             $nomeMatriculaLinhas = $breakTextForQR($nomeMatriculaTexto, 50);
             foreach ($nomeMatriculaLinhas as $linha) {
@@ -519,7 +588,6 @@ class SignatureController extends Controller
             $textLines[] = "APONTE SUA CAMARA PARA O QRCODE PARA VERIFICAR AUTENTICIDADE.";
             $totalTextBlockWidth = (count($textLines) - 1) * $lineHeight;
 
-            // Posicionar no canto inferior esquerdo (mesmo formato original)
             $qrX_left = $margin;
             $qrY_common = $pageHeight - $qrHeight - $margin;
             $fpdi->Image($qrData, $qrX_left, $qrY_common, $qrWidth, $qrHeight, 'png');
@@ -546,7 +614,10 @@ class SignatureController extends Controller
                 ->header('Device-Id', $deviceInfo['device_id'] ?? 'not-available')
                 ->header('Device-Trust-Level', $deviceInfo['trust_level'] ?? '0')
                 ->header('Device-Newly-Registered', $deviceInfo['newly_registered'] ?? 'false')
-                ->header('Access-Control-Expose-Headers', 'verification-code, id-documento, document-binding-id, validation-code, device-id, device-trust-level, device-newly-registered') // Expor todos os headers para o cliente
+                ->header('Total-Pages', $pageCount)
+                ->header('Signed-Pages', $signAllPages ? implode(',', range(1, $pageCount)) : implode(',', $selectedPages))
+                ->header('Sign-All-Pages', $signAllPages ? 'true' : 'false')
+                ->header('Access-Control-Expose-Headers', 'verification-code, id-documento, document-binding-id, validation-code, device-id, device-trust-level, device-newly-registered, total-pages, signed-pages, sign-all-pages') // Expor todos os headers para o cliente
                 ->header('Access-Control-Allow-Origin', '*')
                 ->header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
                 ->header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
@@ -1006,6 +1077,24 @@ class SignatureController extends Controller
                 'senha_length' => strlen($senha)
             ]);
             throw new Exception('Erro na descriptografia: ' . $e->getMessage());
+        }
+    }
+
+
+    function countPages(Request $request){
+        $file = $request->file('file');
+
+        try {
+            $pdf = new Fpdi();
+            $pageCount = $pdf->setSourceFile($file->getPathname());
+
+            return response()->json([
+                'page_count' => $pageCount
+            ], 200);
+        } catch (Exception $e) {
+            return response()->json([
+                'error' => $e->getMessage()
+            ], 500);
         }
     }
 }

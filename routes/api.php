@@ -28,6 +28,7 @@ Route::middleware('auth:sanctum')->get('/user', function (Request $request) {
 
 Route::post('/', [SignatureController::class, 'index']);
 Route::get('/signature/{codigoVerificao}', [SignatureController::class, 'signature']);
+Route::post('/count-pages', [SignatureController::class, 'countPages']);
 Route::get('/document/{id_documento}', [SignatureController::class, 'viewDocument'])->name('api.document.view');
 Route::get('/view-document/{id_documento}', [SignatureController::class, 'showDocumentViewer']);
 Route::get('/signed-document/{codigo_transacao}', [SignatureController::class, 'viewSignedDocument']);
