@@ -402,47 +402,60 @@ class SignatureController extends Controller
                 $fpdi->setFont('helvetica', 'B', 8);
                 $fpdi->SetTextColor(0, 0, 0);
 
-                $pageHeight = $fpdi->GetPageHeight();
-
-
+                                $pageHeight = $fpdi->GetPageHeight();
 
                 // Posições dos dois blocos
-                $blocoEsquerdoX = 100;
+                $blocoEsquerdoX = 110;
                 $blocoDireitoX = 150;
-                $watermarkY = $pageHeight - 36;
+                $watermarkY = $pageHeight - 38;
                 $lineHeight = 3.1;
 
                 // === BLOCO 1 (ESQUERDO) ===
-                // Linha 1: NOME
-                $fpdi->SetXY($blocoEsquerdoX, $watermarkY);
-                $fpdi->Cell(50, $lineHeight, strtoupper($nome), 0, 0, 'L');
+                // Quebrar o nome em linhas se necessário (largura máxima: 45 unidades)
+                $nomeLinhas = $this->breakText(strtoupper($nome) .  ':' . '080.000.000-00', 37, $fpdi);
 
-                // Linha 2: ENTIDADE:MATRICULA
-                $fpdi->SetXY($blocoEsquerdoX, $watermarkY + $lineHeight);
-                $fpdi->Cell(50, $lineHeight, ':' . $matricula, 0, 0, 'L');
+                $currentY = $watermarkY;
+                foreach ($nomeLinhas as $linha) {
+                    $fpdi->SetXY($blocoEsquerdoX, $currentY);
+                    $fpdi->Cell(50, $lineHeight, $linha, 0, 0, 'L');
+                    $currentY += $lineHeight;
+                }
 
+                // // Linha seguinte: ENTIDADE:MATRICULA
+                // $fpdi->SetXY($blocoEsquerdoX, $currentY);
+                // $fpdi->Cell(50, $lineHeight, ':' . $matricula, 0, 0, 'L');
 
                 // === BLOCO 2 (DIREITO) ===
+                $currentYRight = $watermarkY;
+
                 // Linha 1: "Assinado de forma digital"
-                $fpdi->SetXY($blocoDireitoX, $watermarkY);
+                $fpdi->SetXY($blocoDireitoX, $currentYRight);
                 $fpdi->Cell(60, $lineHeight, 'Assinado de forma digital', 0, 0, 'L');
+                $currentYRight += $lineHeight;
 
-                // Linha 2: "por NOME"
-                $fpdi->SetXY($blocoDireitoX, $watermarkY + $lineHeight);
-                $fpdi->Cell(60, $lineHeight, 'por ' . strtoupper($nome) . ':', 0, 0, 'L');
+                // Linha 2+: "por NOME:" - quebrar se necessário (largura máxima: 55 unidades)
+                $porTexto = 'por ' . strtoupper($nome) . ':';
+                $porLinhas = $this->breakText($porTexto, 55, $fpdi);
 
-                // Linha 3: ENTIDADE:CPF (se disponível)
-                $fpdi->SetXY($blocoDireitoX, $watermarkY + ($lineHeight * 2));
+                foreach ($porLinhas as $linha) {
+                    $fpdi->SetXY($blocoDireitoX, $currentYRight);
+                    $fpdi->Cell(60, $lineHeight, $linha, 0, 0, 'L');
+                    $currentYRight += $lineHeight;
+                }
+
+                // Linha seguinte: ENTIDADE:CPF (se disponível)
+                $fpdi->SetXY($blocoDireitoX, $currentYRight);
                 $fpdi->Cell(60, $lineHeight, $cpf ?? '080.000.000-00', 0, 0, 'L');
+                $currentYRight += $lineHeight;
 
-
-                // Linha 4: Data
-                $fpdi->SetXY($blocoDireitoX, $watermarkY + ($lineHeight * 3));
+                // Linha seguinte: Data
+                $fpdi->SetXY($blocoDireitoX, $currentYRight);
                 $dataFormatada = date('Y.m.d H:i:s', strtotime($data_assinatura));
                 $fpdi->Cell(60, $lineHeight, 'Dados: ' . $dataFormatada, 0, 0, 'L');
+                $currentYRight += $lineHeight;
 
-                // Linha 5: Horário
-                $fpdi->SetXY($blocoDireitoX, $watermarkY + ($lineHeight * 4));
+                // Linha seguinte: Horário
+                $fpdi->SetXY($blocoDireitoX, $currentYRight);
                 $horarioFormatado = date('H:i:s -03\'00', strtotime($data_assinatura));
                 $fpdi->Cell(60, $lineHeight, $horarioFormatado, 0, 0, 'L');
             }
@@ -458,12 +471,52 @@ class SignatureController extends Controller
             $qrHeight = 20;
 
             $fpdi->setFont('helvetica', '', 6);
-            $textLines = [
-                "DOCUMENTO ASSINADO DIGITALMENTE. CODIGO {$codigoVerificao} - DATA DA ASSINATURA: {$data_assinatura}",
-                strtoupper($nome) . " MATRICULA: {$matricula}",
-                "CARGO: " . strtoupper($cargo) . " ORGAO:" . $signatureServices->removeCaracteresEspeciais($secretaria, ' '),
-                "APONTE SUA CAMARA PARA O QRCODE PARA VERIFICAR AUTENTICIDADE.",
-            ];
+
+            // Função helper para quebrar texto em múltiplas linhas para QR code
+            $breakTextForQR = function($text, $maxChars) {
+                if (strlen($text) <= $maxChars) {
+                    return [$text];
+                }
+
+                $words = explode(' ', $text);
+                $lines = [];
+                $currentLine = '';
+
+                foreach ($words as $word) {
+                    $testLine = $currentLine . ($currentLine ? ' ' : '') . $word;
+
+                    if (strlen($testLine) <= $maxChars) {
+                        $currentLine = $testLine;
+                    } else {
+                        if ($currentLine) {
+                            $lines[] = $currentLine;
+                            $currentLine = $word;
+                        } else {
+                            // Palavra muito longa, adicionar mesmo assim
+                            $lines[] = $word;
+                        }
+                    }
+                }
+
+                if ($currentLine) {
+                    $lines[] = $currentLine;
+                }
+
+                return $lines;
+            };
+
+            $textLines = [];
+            $textLines[] = "DOCUMENTO ASSINADO DIGITALMENTE. CODIGO {$codigoVerificao} - DATA DA ASSINATURA: {$data_assinatura}";
+
+            // Quebrar a linha do nome e matrícula se necessário
+            $nomeMatriculaTexto = strtoupper($nome) . " MATRICULA: {$matricula}";
+            $nomeMatriculaLinhas = $breakTextForQR($nomeMatriculaTexto, 50);
+            foreach ($nomeMatriculaLinhas as $linha) {
+                $textLines[] = $linha;
+            }
+
+            $textLines[] = "CARGO: " . strtoupper($cargo) . " ORGAO:" . $signatureServices->removeCaracteresEspeciais($secretaria, ' ');
+            $textLines[] = "APONTE SUA CAMARA PARA O QRCODE PARA VERIFICAR AUTENTICIDADE.";
             $totalTextBlockWidth = (count($textLines) - 1) * $lineHeight;
 
             // Posicionar no canto inferior esquerdo (mesmo formato original)
@@ -827,6 +880,75 @@ class SignatureController extends Controller
                 'filename' => $fileName
             ]);
         }
+    }
+
+    /**
+     * Quebra texto em múltiplas linhas baseado na largura especificada
+     */
+    private function breakText($text, $maxWidth, $fpdi)
+    {
+        $words = explode(' ', $text);
+        $lines = [];
+        $currentLine = '';
+
+        foreach ($words as $word) {
+            $testLine = $currentLine . ($currentLine ? ' ' : '') . $word;
+            $width = $fpdi->GetStringWidth($testLine);
+
+            if ($width <= $maxWidth) {
+                $currentLine = $testLine;
+            } else {
+                if ($currentLine) {
+                    $lines[] = $currentLine;
+                    $currentLine = $word;
+                } else {
+                    // Palavra muito longa, forçar quebra
+                    $lines[] = $word;
+                }
+            }
+        }
+
+        if ($currentLine) {
+            $lines[] = $currentLine;
+        }
+
+        return $lines;
+    }
+
+    /**
+     * Quebra texto baseado em número de caracteres (para QR code)
+     */
+    private function breakTextByChars($text, $maxChars)
+    {
+        if (strlen($text) <= $maxChars) {
+            return [$text];
+        }
+
+        $words = explode(' ', $text);
+        $lines = [];
+        $currentLine = '';
+
+        foreach ($words as $word) {
+            $testLine = $currentLine . ($currentLine ? ' ' : '') . $word;
+
+            if (strlen($testLine) <= $maxChars) {
+                $currentLine = $testLine;
+            } else {
+                if ($currentLine) {
+                    $lines[] = $currentLine;
+                    $currentLine = $word;
+                } else {
+                    // Palavra muito longa, adicionar mesmo assim
+                    $lines[] = $word;
+                }
+            }
+        }
+
+        if ($currentLine) {
+            $lines[] = $currentLine;
+        }
+
+        return $lines;
     }
 
     /**
