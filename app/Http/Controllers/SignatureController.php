@@ -219,7 +219,6 @@ class SignatureController extends Controller
                         $deviceInfo['suspicious_indicators'] = $suspiciousActivity;
                     }
                 }
-
             } catch (Exception $deviceException) {
                 Log::error('Erro na verificação de dispositivo', [
                     'matricula' => $matricula,
@@ -337,7 +336,6 @@ class SignatureController extends Controller
                             'device_id' => $deviceEnhancement['device_id'],
                             'trust_level' => $deviceEnhancement['trust_level']
                         ]);
-
                     } catch (Exception $deviceIntegrationException) {
                         Log::error('Erro ao integrar device binding com document binding', [
                             'matricula' => $matricula,
@@ -390,22 +388,70 @@ class SignatureController extends Controller
 
             // Gerar o qrcode
             // $qrImage = QrCode::format('png')->size(500)->generate('http://192.168.18.243:8001/api/verifySignature?token=' . $token . '&zk=' . $zkAuth['zk_token']);
-            $qrImage = QrCode::format('png')->size(500)->generate('http://192.168.18.243:8000/'.$entidade.'/services/signature/confirmation-signature?token=' . $token . '&zk=' . $zkAuth['zk_token']);
+            $qrImage = QrCode::format('png')->size(500)->generate('http://192.168.18.243:8000/' . $entidade . '/services/signature/confirmation-signature?token=' . $token . '&zk=' . $zkAuth['zk_token']);
             $qrData = 'data://text/plain;base64,' . base64_encode($qrImage);
 
-                        // Importar todas as páginas originais do documento SEM QR code
+            $addWatermark = true;
+            $watermarkPosition = $request->input('watermark_position', 'right');
+
             for ($pageNo = 1; $pageNo <= $pageCount; $pageNo++) {
                 $template = $fpdi->importPage($pageNo);
                 $fpdi->addPage();
                 $fpdi->useTemplate($template);
+
+                $fpdi->setFont('helvetica', 'B', 8);
+                $fpdi->SetTextColor(0, 0, 0);
+
+                $pageHeight = $fpdi->GetPageHeight();
+
+
+
+                // Posições dos dois blocos
+                $blocoEsquerdoX = 100;
+                $blocoDireitoX = 150;
+                $watermarkY = $pageHeight - 36;
+                $lineHeight = 3.1;
+
+                // === BLOCO 1 (ESQUERDO) ===
+                // Linha 1: NOME
+                $fpdi->SetXY($blocoEsquerdoX, $watermarkY);
+                $fpdi->Cell(50, $lineHeight, strtoupper($nome), 0, 0, 'L');
+
+                // Linha 2: ENTIDADE:MATRICULA
+                $fpdi->SetXY($blocoEsquerdoX, $watermarkY + $lineHeight);
+                $fpdi->Cell(50, $lineHeight, ':' . $matricula, 0, 0, 'L');
+
+
+                // === BLOCO 2 (DIREITO) ===
+                // Linha 1: "Assinado de forma digital"
+                $fpdi->SetXY($blocoDireitoX, $watermarkY);
+                $fpdi->Cell(60, $lineHeight, 'Assinado de forma digital', 0, 0, 'L');
+
+                // Linha 2: "por NOME"
+                $fpdi->SetXY($blocoDireitoX, $watermarkY + $lineHeight);
+                $fpdi->Cell(60, $lineHeight, 'por ' . strtoupper($nome) . ':', 0, 0, 'L');
+
+                // Linha 3: ENTIDADE:CPF (se disponível)
+                $fpdi->SetXY($blocoDireitoX, $watermarkY + ($lineHeight * 2));
+                $fpdi->Cell(60, $lineHeight, $cpf ?? '080.000.000-00', 0, 0, 'L');
+
+
+                // Linha 4: Data
+                $fpdi->SetXY($blocoDireitoX, $watermarkY + ($lineHeight * 3));
+                $dataFormatada = date('Y.m.d H:i:s', strtotime($data_assinatura));
+                $fpdi->Cell(60, $lineHeight, 'Dados: ' . $dataFormatada, 0, 0, 'L');
+
+                // Linha 5: Horário
+                $fpdi->SetXY($blocoDireitoX, $watermarkY + ($lineHeight * 4));
+                $horarioFormatado = date('H:i:s -03\'00', strtotime($data_assinatura));
+                $fpdi->Cell(60, $lineHeight, $horarioFormatado, 0, 0, 'L');
             }
 
-                        // Adicionar uma última página dedicada ao QR code no formato vertical original
+            // Adicionar uma última página dedicada ao QR code no formato vertical original
             $fpdi->addPage();
             $pageHeight = $fpdi->GetPageHeight();
             $pageWidth = $fpdi->GetPageWidth();
 
-            // Usar as mesmas configurações do QR code vertical original
             $margin = 10;
             $lineHeight = 4;
             $qrWidth = 20;
@@ -632,7 +678,6 @@ class SignatureController extends Controller
                 $fpdi->Ln(5);
                 $fpdi->SetFont('helvetica', '', 10);
                 $fpdi->Cell(0, 10, 'Para verificar a integridade completa, use o QR Code presente no documento original.', 0, 1, 'C');
-
             } else {
                 // Documento não encontrado - mostrar página de erro
                 $fpdi = new Fpdi();
@@ -688,7 +733,6 @@ class SignatureController extends Controller
             var_dump($codigo_transacao);
             die();
         } catch (Exception $e) {
-
         }
     }
 
@@ -788,7 +832,7 @@ class SignatureController extends Controller
     /**
      * Descriptografa dados AES-GCM enviados do frontend
      */
-        private function descriptografarDados($dadosArray, $ivArray, $senha)
+    private function descriptografarDados($dadosArray, $ivArray, $senha)
     {
         try {
             $dadosCriptografados = '';
@@ -832,7 +876,6 @@ class SignatureController extends Controller
             }
 
             return $dados;
-
         } catch (Exception $e) {
             Log::error('Erro na descriptografia AES-GCM', [
                 'error' => $e->getMessage(),
