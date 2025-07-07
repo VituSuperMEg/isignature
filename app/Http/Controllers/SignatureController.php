@@ -443,7 +443,21 @@ class SignatureController extends Controller
             for ($pageNo = 1; $pageNo <= $pageCount; $pageNo++) {
                 $shouldSign = $signAllPages || in_array($pageNo, $selectedPages);
                 $template = $fpdi->importPage($pageNo);
-                $fpdi->addPage();
+
+                // Obter dimensões da página original para preservar orientação
+                $templateSize = $fpdi->getTemplateSize($template);
+                $originalWidth = $templateSize['width'];
+                $originalHeight = $templateSize['height'];
+
+                // Determinar orientação: se largura > altura = paisagem (landscape)
+                if ($originalWidth > $originalHeight) {
+                    // Página em paisagem (horizontal)
+                    $fpdi->addPage('L', [$originalWidth, $originalHeight]);
+                } else {
+                    // Página em retrato (vertical)
+                    $fpdi->addPage('P', [$originalWidth, $originalHeight]);
+                }
+
                 $fpdi->useTemplate($template);
 
                 // Aplicar assinatura apenas se esta página deve ser assinada
