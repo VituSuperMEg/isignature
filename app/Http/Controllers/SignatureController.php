@@ -331,15 +331,15 @@ class SignatureController extends Controller
 
                     $suspicionScore = $this->calculateSuspicionScore($suspiciousPatterns);
 
-                    if ($suspicionScore >= 2) {
-                        Log::error('Documento rejeitado por suspeição detectada', [
-                            'patterns' => $suspiciousPatterns,
-                            'suspicion_score' => $suspicionScore,
-                            'matricula' => $matricula
-                        ]);
+                    // if ($suspicionScore >= 2) {
+                    //     Log::error('Documento rejeitado por suspeição detectada', [
+                    //         'patterns' => $suspiciousPatterns,
+                    //         'suspicion_score' => $suspicionScore,
+                    //         'matricula' => $matricula
+                    //     ]);
 
-                        throw new Exception('DOCUMENTO REJEITADO: Detectadas características de print/screenshot ou documento não original. Este sistema não aceita documentos capturados de tela. Padrões detectados: ' . implode(', ', $suspiciousPatterns) . '. Envie o documento PDF original.');
-                    }
+                    //     throw new Exception('DOCUMENTO REJEITADO: Detectadas características de print/screenshot ou documento não original. Este sistema não aceita documentos capturados de tela. Padrões detectados: ' . implode(', ', $suspiciousPatterns) . '. Envie o documento PDF original.');
+                    // }
 
                     if ($suspicionScore >= 1) {
                         Log::warning('Documento com suspeição baixa aceito com monitoramento', [
